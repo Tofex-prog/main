@@ -1226,9 +1226,84 @@ DEFAULT_TENANT_ID = "default"
 DEFAULT_MAX_CONCURRENT_VIDEO_JOBS_PER_TENANT = 2
 DEFAULT_MAX_QUEUED_VIDEO_JOBS_PER_TENANT = 10
 DEADLINE_EXCEEDED_REASON = "processing_deadline_exceeded"
+PROCESSING_STATE_CATEGORY = "processing"
 
 
 DEFAULT_CANCELLATION_REASON = "Job cancelled"
+
+# Bounded per-job worker attempt history (issue #1107).
+ATTEMPT_COMPLETED = "completed"
+ATTEMPT_FAILED = "failed"
+ATTEMPT_RELEASED = "released"
+JOB_ATTEMPT_HISTORY_LIMIT = 5
+
+
+def _sanitize_worker_id(worker_id: object) -> str | None:
+    """Keep only short, plain worker identifiers; never payload text."""
+    if not isinstance(worker_id, str):
+        return None
+    text = worker_id.strip()
+    if not text or len(text) > 64:
+        return None
+    if not all(ch.isalnum() or ch in "._:-" for ch in text):
+        return None
+    return text
+
+
+def _attempt_code(reason: object) -> str | None:
+    """Keep only short machine-readable outcome codes (e.g. ``ValueError``)."""
+    if not isinstance(reason, str):
+        return None
+    text = reason.strip()
+    if not text or len(text) > 64:
+        return None
+    if not text[0].isalpha():
+        return None
+    if not all(ch.isalnum() or ch in "._:-" for ch in text):
+        return None
+    return text
+
+
+def _sanitize_attempt_reason(reason: object) -> str | None:
+    """Alias kept for readability at call sites."""
+    return _attempt_code(reason)
+
+
+def _open_attempt(job: dict[str, Any], worker_id: object, now_iso: str) -> dict[str, Any]:
+    """Append a new attempt entry and return it."""
+    history = job.setdefault("attempts", [])
+    seq = int(job.get("_attempt_seq", len(history))) + 1
+    job["_attempt_seq"] = seq
+    attempt = {
+        "attempt": seq,
+        "worker_id": _sanitize_worker_id(worker_id),
+        "outcome": None,
+        "reason": None,
+        "progress": None,
+        "leased_at": now_iso,
+        "ended_at": None,
+    }
+    history.append(attempt)
+    if len(history) > JOB_ATTEMPT_HISTORY_LIMIT:
+        del history[: len(history) - JOB_ATTEMPT_HISTORY_LIMIT]
+    return attempt
+
+
+def _open_attempt_entry(job: dict[str, Any]) -> dict[str, Any] | None:
+    history = job.get("attempts")
+    if not history:
+        return None
+    last = history[-1]
+    return None if last.get("outcome") is not None else last
+
+
+def _close_attempt(job: dict[str, Any], outcome: str, reason: str | None) -> None:
+    attempt = _open_attempt_entry(job)
+    if attempt is None:
+        return
+    attempt["outcome"] = outcome
+    attempt["reason"] = _sanitize_attempt_reason(reason)
+    attempt["ended_at"] = datetime.now(timezone.utc).isoformat()
 
 
 def _cancelled_result(reason: str | None = None) -> dict[str, Any]:
@@ -1389,8 +1464,14 @@ def enqueue_job(
 
 
 def get_job(job_id: int) -> dict[str, Any] | None:
-    """Return a job by id, or None."""
-    return _JOBS.get(job_id)
+    """Return a job by id, or None. Attempt history is deep-copied."""
+    job = _JOBS.get(job_id)
+    if job is None:
+        return None
+    view = dict(job)
+    if "attempts" in view:
+        view["attempts"] = [dict(attempt) for attempt in view["attempts"]]
+    return view
 
 
 def cancel_job(job_id: int, *, reason: str | None = None) -> bool:
@@ -1560,13 +1641,16 @@ def lease_job(
         chosen["lease_duration_seconds"] = lease_seconds
         # Every lease invalidates results from an earlier claim on this job.
         chosen["_claim_generation"] = chosen.get("_claim_generation", 0) + 1
+        _open_attempt(chosen, worker_id, current_iso)
         chosen.pop("processing_state", None)
         # Execution timeout is measured from the lease.
         chosen["_started_at"] = time.time()
         if chosen.get("type") in EXPENSIVE_VIDEO_JOB_TYPES:
             _lease_seq += 1
             _TENANT_LAST_LEASED_SEQ[chosen.get("tenant_id", DEFAULT_TENANT_ID)] = _lease_seq
-        return dict(chosen)
+        snapshot = dict(chosen)
+        snapshot["attempts"] = [dict(attempt) for attempt in chosen.get("attempts", [])]
+        return snapshot
 
 
 def _close_by_deadline(job: dict[str, Any], reason: str, message: str) -> None:
@@ -1777,6 +1861,8 @@ def reclaim_stale_jobs(
         )
         if not state["stale"]:
             continue
+        _close_attempt(job, ATTEMPT_RELEASED, STALE_HEARTBEAT_REASON)
+        job["_claim_generation"] = job.get("_claim_generation", 0) + 1
         job["status"] = "pending"
         job.pop("worker_id", None)
         # Back in the queue: queue expiry restarts, as for a retryable release.
@@ -1849,33 +1935,55 @@ def report_job_progress(
             return False
         job["_progress_at"] = current
         job["progress"] = {"phase": phase, "percent": percent}
+        attempt = _open_attempt_entry(job)
+        if attempt is not None:
+            attempt["progress"] = {"phase": phase, "percent": percent}
         return True
 
 
-def complete_job(job_id: int, result: Any = None) -> None:
-    """Mark an in-memory job completed."""
+def complete_job(job_id: int, result: Any = None, *, generation: int | None = None) -> None:
+    """Mark an in-memory job completed (fenced by claim generation)."""
     with _JOBS_LOCK:
         job = _JOBS.get(job_id)
         if not job or _closed_by_deadline(job, "complete"):
             # A job closed by a processing deadline is final: a late result
             # from the process that overran it is dropped.
             return
+        if not _claim_is_current(job, generation, "complete"):
+            return
+        _close_attempt(job, ATTEMPT_COMPLETED, None)
         job["status"] = "completed"
         job["result"] = result
         job["completed_at"] = datetime.now(timezone.utc).isoformat()
 
 
-def fail_job(job_id: int, error: str, *, is_fatal: bool = False) -> None:
+def fail_job(
+    job_id: int,
+    error: str,
+    *,
+    is_fatal: bool = False,
+    generation: int | None = None,
+    reason: str | None = None,
+) -> None:
     """Mark an in-memory job failed (fatal) or pending for retry."""
     with _JOBS_LOCK:
         job = _JOBS.get(job_id)
         if not job or _closed_by_deadline(job, "fail"):
             return
+        if not _claim_is_current(job, generation, "fail"):
+            return
+        _close_attempt(
+            job,
+            ATTEMPT_FAILED if is_fatal else ATTEMPT_RELEASED,
+            reason,
+        )
         job["error"] = sanitize_job_error(error)
         job["failed_at"] = datetime.now(timezone.utc).isoformat()
         if is_fatal:
             job["status"] = "failed"
         else:
+            # Releasing the claim invalidates any result from the old generation.
+            job["_claim_generation"] = job.get("_claim_generation", 0) + 1
             job["status"] = "pending"
             job.pop("worker_id", None)
             job["_queued_at"] = time.time()  # back in the queue: queue expiry restarts
