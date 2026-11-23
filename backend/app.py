@@ -116,7 +116,12 @@ def build_reconcile_batch_report(
         "complete_batch": int(processed) == int(selected),
         "complete_backlog": int(deferred) == 0 and int(processed) == int(selected),
     }
-from idempotency import idempotent
+from idempotency import (
+    IntentConflictError,
+    idempotent,
+    persist_registration_intent,
+    registration_intent_digest,
+)
 from lineage import (
     LineageValidationError,
     canonical_lineage_manifest,

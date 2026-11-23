@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import logging
@@ -891,8 +892,8 @@ def valid_register_payload(**overrides) -> dict[str, object]:
         "tier": "source",
         "txHash": "dd" * 32,
         "txStatus": "confirmed",
-        "sourceAddress": "GDVRSXIO4SK2KSMUKJTQHMDDHBBFC7NGZZ6WLVOPKAG47GYPYAZCZR7G",
-        "contractId": "CCKTQNMBLXZXMWVR2WG4HDDUI3QGJU5LV5NTLFPCB72UITWE5TEDK7BT",
+        "sourceAddress": "GDVRSXIO4SK2KSMUKJTQHMDDHBBFC7NGZZ6WLVOPKAG47GYPYAZCZZWH",
+        "contractId": "CCKTQNMBLXZXMWVR2WG4HDDUI3QGJU5LV5NTLFPCB72UITWE5TEDKM34",
     }
     base.update(overrides)
     return base
@@ -1829,7 +1830,9 @@ class JobDownloadRangeAndETagTest(unittest.TestCase):
             # 1. Non-existent job -> 404
             resp = client.get("/api/jobs/9999/download")
             self.assertEqual(resp.status_code, 404)
-            self.assertEqual(resp.get_json(), {"error": "Job not found"})
+            body = resp.get_json()
+            self.assertEqual(body["error"], "Job not found")
+            self.assertIn("request_id", body)
 
             # 2. Non-embed job type -> 400
             db._JOBS[201] = {
@@ -1840,7 +1843,7 @@ class JobDownloadRangeAndETagTest(unittest.TestCase):
             }
             resp = client.get("/api/jobs/201/download")
             self.assertEqual(resp.status_code, 400)
-            self.assertEqual(resp.get_json(), {"error": "No output available for download"})
+            self.assertEqual(resp.get_json()["error"], "No output available for download")
 
             # 3. Pending job -> 400
             db._JOBS[202] = {
@@ -1851,7 +1854,7 @@ class JobDownloadRangeAndETagTest(unittest.TestCase):
             }
             resp = client.get("/api/jobs/202/download")
             self.assertEqual(resp.status_code, 400)
-            self.assertEqual(resp.get_json(), {"error": "No output available for download"})
+            self.assertEqual(resp.get_json()["error"], "No output available for download")
 
             # 4. Failed job -> 400
             db._JOBS[203] = {
@@ -1862,7 +1865,7 @@ class JobDownloadRangeAndETagTest(unittest.TestCase):
             }
             resp = client.get("/api/jobs/203/download")
             self.assertEqual(resp.status_code, 400)
-            self.assertEqual(resp.get_json(), {"error": "No output available for download"})
+            self.assertEqual(resp.get_json()["error"], "No output available for download")
 
             # 5. Completed job but output file missing -> 404
             db._JOBS[204] = {

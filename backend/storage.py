@@ -258,7 +258,13 @@ def _paths_alias(resolved_a: Path, resolved_b: Path) -> bool:
     return False
 
 
-# --- restored from history ---
+# Default on-disk root; ``HARPOCRATES_STORAGE_DIR`` overrides it.
+default_storage_dir = os.getenv(
+    "HARPOCRATES_DEFAULT_STORAGE_DIR",
+    str(Path(__file__).resolve().parent / "storage"),
+)
+
+
 def get_storage_dir() -> Path:
     storage_dir = Path(os.getenv("HARPOCRATES_STORAGE_DIR", default_storage_dir))
 
