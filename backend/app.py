@@ -811,7 +811,7 @@ def create_app() -> Flask:
         app.logger.error("Unhandled runtime error: %s", error, exc_info=True)
         return error_response(
             code=INTERNAL_ERROR,
-            message="internal server error",
+            message=str(error) or "internal server error",
             status=500,
         )
 

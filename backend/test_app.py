@@ -482,7 +482,7 @@ class AppHardeningTest(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 500)
-        self.assertEqual(response.json["error"], "ffmpeg is required for steganography processing")
+        self.assertEqual(response.json["error"]["message"], "ffmpeg is required for steganography processing")
 
     def test_embed_ffprobe_failure_removes_temp_directory(self) -> None:
         def require_video_tool(binary: str) -> str:
@@ -500,7 +500,7 @@ class AppHardeningTest(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 500)
-        self.assertEqual(response.json["error"], "ffprobe is required for steganography processing")
+        self.assertEqual(response.json["error"]["message"], "ffprobe is required for steganography processing")
 
     def test_extract_failure_removes_temp_directory(self) -> None:
         response = self.post_with_tracked_tempdirs(
@@ -510,7 +510,7 @@ class AppHardeningTest(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 500)
-        self.assertEqual(response.json["error"], "metadata extraction failed")
+        self.assertEqual(response.json["error"]["message"], "metadata extraction failed")
 
     def test_embed_database_failure_removes_temp_directory(self) -> None:
         def fake_embed(_source_path: str, output_path: str, _metadata: dict[str, object]) -> None:
@@ -529,7 +529,7 @@ class AppHardeningTest(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 500)
-        self.assertEqual(response.json["error"], "database write failed")
+        self.assertEqual(response.json["error"]["message"], "database write failed")
 
     def test_extract_database_failure_removes_temp_directory(self) -> None:
         response = self.post_with_tracked_tempdirs(
@@ -540,7 +540,7 @@ class AppHardeningTest(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 500)
-        self.assertEqual(response.json["error"], "database write failed")
+        self.assertEqual(response.json["error"]["message"], "database write failed")
 
     def post_with_tracked_tempdirs(self, path: str, data: dict[str, object], *patches):
         observed: list[Path] = []
