@@ -146,6 +146,7 @@ from metadata_errors import (
 )
 from schema import discover_schemas, resolve_schema, validate_selective_disclosure_input
 from verification_receipt import build_verification_receipt
+import stego
 from stego import StegoLimitExceededError, canonical_metadata_hash, embed_metadata, extract_metadata, sha256_file
 from capture_attestation import (
     build_assurance_schema,
@@ -977,7 +978,6 @@ def create_app() -> Flask:
             return jsonify({"error": "video and metadata are required"}), 400
         if not _enforce_video_size(video):
             return jsonify({"error": "video payload exceeds size limit"}), 413
-        validate_video_upload(video)
         if len(metadata_raw.encode("utf-8")) > config.max_metadata_bytes:
             return metadata_error_response(
                 MetadataError(METADATA_OVERSIZED, "metadata is too large")
@@ -1007,6 +1007,10 @@ def create_app() -> Flask:
             except ValueError as exc:
                 return metadata_error_response(classify_validation_error(exc))
 
+            # Metadata is validated first so a bad envelope is reported even
+            # when the upload itself is unusable.
+            validate_video_upload(video)
+
             normalized_name = normalize_filename(video.filename)
             try:
                 quarantine_context = isolate_upload(
@@ -1015,6 +1019,10 @@ def create_app() -> Flask:
                     content_type=video.content_type,
                 )
                 with quarantine_context as quarantined_path, EncryptedWorkspace() as workspace:
+                    # Check the media toolchain before decoding so a missing
+                    # binary reports itself instead of an opaque probe error.
+                    stego._require("ffmpeg")
+                    stego._require("ffprobe")
                     source_url = workspace.get_url("source.video")
                     output_url = workspace.get_url("embedded.mp4")
                     with quarantined_path.open("rb") as quarantined:
@@ -2927,7 +2935,7 @@ def validate_video_upload(video) -> None:
 
     content_type = (video.content_type or "").lower()
     if content_type and not content_type.startswith("video/") and content_type != "application/octet-stream":
-        raise QuarantineError("video upload must use a video/* or application/octet-stream content type")
+        raise QuarantineError("video upload must use a video content type")
 
     # Stream-level magic-byte sniff: detects mismatches between declared type
     # and actual file contents before the file is persisted anywhere.
